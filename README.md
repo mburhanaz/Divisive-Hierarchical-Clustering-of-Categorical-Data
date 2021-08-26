@@ -1,1 +1,1 @@
-# Divisive-Hierarchical-Clustering-of-Categorical-Data
+# Divisive-Hierarchical-Clustering-of-Categorical-Data-Edited
