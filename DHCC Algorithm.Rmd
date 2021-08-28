@@ -1,0 +1,527 @@
+---
+title: "Final Project"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Create Segmentation of Mapagama Member Based on Categorical Attribute using "Divisive Hierarchical Clustering of Categorical Data" (DHCC) Algorithm.
+
+This is an implementation "Divisive Hierarchical Clustering of Categorical Data" (DHCC) Algorithm (<https://www.proquest.com/docview/914527145>) on member of Mahasiswa Pencinta Alam Universitas Gadjah Mada (Mapagama),which is the student activity unit owned by Universitas Gadjah Mada.
+Categorical attributes are based on the answers to several questions collected with the online form, given the table below :
+```{r,echo=FALSE}
+library(tibble)
+atbcat=c("X1","X2","X3","X4","X5","X6","X7","X8","X9","X10","X11","X12","X13","X14")
+Question=c("Do your expectations about Mapagama match the reality you encountered after becoming a Mapagama Member?",
+           "Are you comfortable in your daily life with Mapagama members, either at the secretariat or other places?",
+           "What types of activities are you interested in at Mapagama?",
+           "I feel I have some control over how Mapagama performs",
+           "I feel I personally invest a lot in Mapagama",
+           "I see myself as an advocate of Mapagama",
+           "I think Mapagama reflects a lot of my personal virtues/values",
+           "I like volunteering at Mapagama",
+           "Volunteering at Mapagama is a fulfilling experience regardless of the time it takes",
+           "It is likely I will voluntarily work at Mapagama",
+           "I think it would be good if I were to volunteer at Mapagama",
+           "Given the chance I would like to volunteer at Mapagama",
+           "I don't have more than enough time to volunteer",
+           "Volunteering increases my time pressure")
+Domain=c("Yes or No",
+         "Yes or No",
+         "Adventure, Non-Adventure, Both",
+         "Likert Scale (1 to 5)",
+         "Likert Scale (1 to 5)",
+         "Likert Scale (1 to 5)",
+         "Likert Scale (1 to 5)",
+         "Likert Scale (1 to 5)",
+         "Likert Scale (1 to 5)",
+         "Likert Scale (1 to 5)",
+         "Likert Scale (1 to 5)",
+         "Likert Scale (1 to 5)",
+         "Likert Scale (1 to 5)",
+         "Likert Scale (1 to 5)")
+maintable=tibble(atbcat,Question,Domain)
+print(maintable)
+```
+
+First, the categorical data is converted into an indicator matrix, denoted by $Z$, which is a Boolean disjunctive table. Given the original categorical data set $T$.The number of values for the *t*-th categorical attribute is denoted by $|D_{t}|$. For each attribute $A_{t}$ of the original categorical data, there are $|D_{t}|$ corresponding columns. Therefore, there will be $J=\sum_{t=1}^{m}|D_{t}|$ columns in $Z$ to represent all the original attributes.Here identical values from different attributes are treated as distinct. The indicator matrix $Z$ is of order $n\times J$, with each element defined as follows:$$z_{ij}=\begin{cases} 1 &\text{if object i takes jth value}\\
+0 & \text{otherwise.}\end{cases}$$
+
+DHCC starts with an all-inclusive cluster containing all the categorical objects, and repeatedly chooses one cluster to split into two subclusters. A binary tree is employed to represent the hierarchical structure of the clustering results, in a way similar to that used in conventional hierarchical clustering algorithms. The overall scheme of DHCC is given below:
+
+1. Transform the original categorical data into indicator matrix $Z$.
+
+2. Initialize a binary tree with a single root holding all objects.
+
+3. Choose one leaf cluster $C_{p}$ to split into two sub cluster $C^L_{p}$ and $C^R_{p}$ based on Multiple correspondence analysis (MCA) calculation on the indicator matrix $Z^{(p)}$.
+
+4. Iteratively refine the objects in clusters $C^L_{p}$ and $C^R_{p}$.
+
+5. Repeat steps (3) and (4) until no leaf cluster can be split to improve the
+clustering quality.
+
+## Defining Function for Step in Algorithm
+
+The core of this algorithm is splitting into two according to step (3). So, here defined *prebi(m,dataZ)* where m is the number of attributes and dataZ is the data set containing the object id and the corresponding indicator matrix for each object.
+This function given below:
+```{r,results='hide',error=FALSE,warning=FALSE,message=FALSE}
+library(tidyverse)
+library(dplyr)
+library(tibble)
+library(Matrix)
+
+```
+
+```{r}
+prebi=function(m,dataZ){
+  HK=list()
+  n=dim(dataZ)[1]
+  Z=as.matrix(as.data.frame(select(dataZ,-Nama),nrow=n))
+  J=dim(Z)[2]
+  P=Z/(n*m)
+  r=matrix((1/n),nrow=n)
+  Dr=diag(1,n)/n
+  c=matrix(diag(t(Z)%*%Z)/(n*m),nrow=J)
+  Dc=as.matrix(Diagonal(J,c))
+  r1=1/sqrt(r)
+  c1=1/sqrt(c)
+  Dr1=as.matrix(Diagonal(n,r1))
+  Dc1=as.matrix(Diagonal(J,c1))
+  S=Dr1%*%(P-r%*%t(c))%*%Dc1
+  S.svd=svd(S,nu=dim(S)[1],nv=dim(S)[2])
+  
+  Sig=as.matrix(Diagonal(n,S.svd$d))
+  f=Dr1%*%S.svd$u%*%Sig
+  dataf=dataZ %>% add_column(KUB=f[,1])
+  daun0=select(subset(dataf,KUB<=0),-KUB)
+  daun1=select(subset(dataf,KUB>0),-KUB)
+  HK=list(dataZ,daun0,daun1)
+  return(HK)
+  }
+```
+
+After being split into two, there is a possibility that a value of attribute does not appear in the cluster that is formed. So to avoid problems in separating in the next step a function is defined to correct the new indicator matrix. This function given below:
+```{r}
+clean=function(CP){
+  CP=CP %>% select_if(negate(function(col)is.numeric(col)&&sum(col)==0))
+  return(CP)
+}
+```
+
+In the refining (step 4) with the intention of improving the quality from the previous step by relocating objects from the cluster generated on the split. After splitting, the refining step tries to improve the quality of the split by finding which sub-cluster, $C_p^L$ or $C_p^R$ is more suitable for each $C_p$ member object. The refining function given as follows:
+```{r}
+refinement=function(Cp,Clp,Crp){
+    repeat{
+      olp=as.matrix(Clp %>%
+        summarize_if(is.numeric, sum, na.rm=TRUE))
+
+      orp=as.matrix(Crp %>%
+        summarize_if(is.numeric, sum, na.rm=TRUE))
+
+      nl=dim(Clp)[1]
+      nr=dim(Crp)[1]
+      Crpnew=tibble()
+      Clpnew=tibble()
+      for(i in 1 :nl){
+        zi=as.matrix(Clp[i,-1])
+        orp=orp+zi
+        nr=nr+1
+        centerl=sqrt(olp/nl)
+        centerr=sqrt(orp/nr)
+        chirp=(zi-centerr)^2/centerr
+        chilp=(zi-centerl)^2/centerl
+        chirp[is.nan(chirp)]=0
+        chilp[is.nan(chilp)]=0
+        schirp=sum(chirp)
+        schilp=sum(chilp)
+        if(schirp<schilp){
+        Crpnew=rbind(Crpnew,Clp[i,])
+          } else {
+        Clpnew=rbind(Clpnew,Clp[i,])
+        }
+      orp=orp-zi
+      nr=nr-1
+    }
+
+    for(i in 1 :nr){
+      zi=as.matrix(Crp[i,-1])
+      olp=olp+zi
+      nl=nl+1
+      centerl=sqrt(olp/nl)
+      centerr=sqrt(orp/nr)
+      chirp=(zi-centerr)^2/centerr
+      chilp=(zi-centerl)^2/centerl
+      chirp[is.nan(chirp)]=0
+      chilp[is.nan(chilp)]=0
+      schirp=sum(chirp)
+      schilp=sum(chilp)
+      
+      if(schilp<schirp){
+        Clpnew=rbind(Clpnew,Crp[i,])
+      } else {
+        Crpnew=rbind(Crpnew,Crp[i,])
+      }
+      olp=olp-zi
+      nl=nl-1
+    }
+    
+    Clp=Clpnew
+    Crp=Crpnew
+  if(nr==dim(Crp)[1]|nl==dim(Clp)[1]|dim(Crp)[1]==0|dim(Clp)[1]==0){
+    break
+    }
+  }
+  HK=list(Cp,Clp,Crp)
+  return(HK)
+}
+```
+
+In this algorithm, splitting is accepted if there is an increase in cluster quality. Furthermore, a function is defined to calculate the quality of cluster separation which requires the original data, the cluster before it was separated, and two clusters resulting from the separation. Given below:
+```{r}
+termination=function(DATA,CP,CLP,CRP){
+  PCT=select(DATA,colnames(CP))
+  PLT=select(DATA,colnames(CLP))
+  PRT=select(DATA,colnames(CRP))
+  
+  ZPCT=as.matrix(PCT %>%
+          summarize_if(is.numeric, sum, na.rm=TRUE))/dim(DATA)[1]
+  ZPLT=as.matrix(PLT %>%
+          summarize_if(is.numeric, sum, na.rm=TRUE))/dim(DATA)[1]
+  ZPRT=as.matrix(PRT %>%
+          summarize_if(is.numeric, sum, na.rm=TRUE))/dim(DATA)[1]
+  
+  PC=as.matrix(CP %>%
+          summarize_if(is.numeric, sum, na.rm=TRUE))/dim(CP)[1]
+  PL=as.matrix(CLP %>%
+          summarize_if(is.numeric, sum, na.rm=TRUE))/dim(CLP)[1]
+  PR=as.matrix(CRP %>%
+          summarize_if(is.numeric, sum, na.rm=TRUE))/dim(CRP)[1]
+  pQC=PC*log(PC)-ZPCT*log(ZPCT)
+  pQL=PL*log(PL)-ZPLT*log(ZPLT)
+  pQR=PR*log(PR)-ZPRT*log(ZPRT)
+  pQC[is.nan(pQC)]=0
+  pQL[is.nan(pQL)]=0
+  pQR[is.nan(pQR)]=0
+  proQC=sum(pQC)
+  proQL=sum(pQL)
+  proQR=sum(pQR)
+  
+  QC=(dim(CP)[1]/dim(DATA)[1])*proQC
+  QL=(dim(CLP)[1]/dim(DATA)[1])*proQL
+  QR=(dim(CRP)[1]/dim(DATA)[1])*proQR
+  
+  QCnew=dim(CLP)[1]/dim(DATA)[1]*QL+dim(CRP)[1]/dim(DATA)[1]*QR
+  Q=list(QC,QCnew)
+  return(Q)
+}
+```
+
+Each function will be executed for separately for represent this algorithm.
+
+## Importing Data
+
+Remember that categorical data must be transformed into an indicator matrix. The provided excel has been transformed into an indicator matrix. **Don't forget to adjust the file directory when importing data**
+```{r, error=FALSE,warning=FALSE,message=FALSE}
+library(readxl)
+dataZ<- read_excel("C:/data-indicator matrix.xlsx")
+as_tibble(dataZ)
+```
+
+## Iteration-1
+
+All 54 individual objects are included in a cluster ($C$) in this iteration. Some of the functions that have been defined above are executed to implement the DHCC algorithm.
+```{r}
+C0=prebi(14,dataZ)[[2]]
+C1=prebi(14,dataZ)[[3]]
+C0r=clean(refinement(dataZ,C0,C1)[[2]])
+C1r=clean(refinement(dataZ,C0,C1)[[3]])
+```
+
+```{r}
+C0r
+```
+```{r}
+C1r
+```
+
+The sub cluster ($C0r$) consists of 38 individuals and the sub cluster ($C1r$) consists of 16 individuals. To ensure whether the separation is accepted, the cluster quality will be calculated.
+```{r}
+QC=termination(dataZ,dataZ,C0r,C1r)
+QC
+```
+
+The separation of cluster ($C$) was acceptable because the quality of the cluster increased after being separated into two sub clusters, from 0 to 0.88. Then the dhcc algorithm is repeated only for leaf cluster whose split is accepted.
+
+## Iteration-2
+
+The same thing is repeated in the sub clusters generated from the previous step.
+```{r}
+C00=prebi(14,C0r)[[2]]
+C01=prebi(14,C0r)[[3]]
+C00r=clean(refinement(C0r,C00,C01)[[2]])
+C01r=clean(refinement(C0r,C00,C01)[[3]])
+QC0=termination(dataZ,C0r,C00r,C01r)
+
+C10=prebi(14,C1r)[[2]]
+C11=prebi(14,C1r)[[3]]
+C10r=clean(refinement(C1r,C10,C11)[[2]])
+C11r=clean(refinement(C1r,C10,C11)[[3]])
+QC1=termination(dataZ,C1r,C10r,C11r)
+```
+
+```{r}
+QC0
+QC1
+```
+
+Only splitting on ($C1r$) was accepted because the quality of the cluster improved after being separated into two sub-clusters.
+
+## Iteration-3
+
+The same thing is repeated in the sub clusters generated from the previous step.
+```{r}
+C100=prebi(14,C10r)[[2]]
+C101=prebi(14,C10r)[[3]]
+C100r=clean(refinement(C10r,C100,C101)[[2]])
+C101r=clean(refinement(C10r,C100,C101)[[3]])
+QC10=termination(dataZ,C10r,C100r,C101r)
+
+C110=prebi(14,C11r)[[2]]
+C111=prebi(14,C11r)[[3]]
+C110r=clean(refinement(C11r,C110,C111)[[2]])
+C111r=clean(refinement(C11r,C110,C111)[[3]])
+QC11=termination(dataZ,C11r,C110r,C111r)
+```
+```{r}
+QC10
+QC11
+```
+
+Splitting on ($C10r$) and ($C11r$) was accepted because the quality of the cluster improved after being separated into two sub-clusters.
+
+#Iteration-4
+
+The same thing is repeated in the sub clusters generated from the previous step.
+```{r}
+C1000=prebi(14,C100r)[[2]]
+C1001=prebi(14,C100r)[[3]]
+C1000r=clean(refinement(C100r,C1000,C1001)[[2]])
+C1001r=clean(refinement(C100r,C1000,C1001)[[3]])
+QC100=termination(dataZ,C100r,C1000r,C1001r)
+
+C1010=prebi(14,C101r)[[2]]
+C1011=prebi(14,C101r)[[3]]
+C1010r=clean(refinement(C101r,C1010,C1011)[[2]])
+C1011r=clean(refinement(C101r,C1010,C1011)[[3]])
+QC101=termination(dataZ,C101r,C1010r,C1011r)
+
+C1100=prebi(14,C110r)[[2]]
+C1101=prebi(14,C110r)[[3]]
+C1100r=clean(refinement(C110r,C1100,C1101)[[2]])
+C1101r=clean(refinement(C110r,C1100,C1101)[[3]])
+QC110=termination(dataZ,C110r,C1100r,C1101r)
+
+C1110=prebi(14,C111r)[[2]]
+C1111=prebi(14,C111r)[[3]]
+C1110r=clean(refinement(C111r,C1110,C1111)[[2]])
+C1111r=clean(refinement(C111r,C1110,C1111)[[3]])
+QC111=termination(dataZ,C111r,C1110r,C1111r)
+```
+```{r}
+QC100
+QC101
+QC110
+QC111
+```
+
+Splitting on ($C101r$), ($C110r$), and ($C111r$) was accepted because the quality of the cluster improved after being separated into two sub-clusters.
+
+## Iteration-5
+
+The same thing is repeated in the sub clusters generated from the previous step.
+```{r}
+C10100=prebi(14,C1010r)[[2]]
+C10101=prebi(14,C1010r)[[3]]
+C10100r=clean(refinement(C1010r,C10100,C10101)[[2]])
+C10101r=clean(refinement(C1010r,C10100,C10101)[[3]])
+QC1010=termination(dataZ,C1010r,C10100r,C10101r)
+
+C10110=prebi(14,C1011r)[[2]]
+C10111=prebi(14,C1011r)[[3]]
+C10110r=clean(refinement(C1011r,C10110,C10111)[[2]])
+C10111r=clean(refinement(C1011r,C10110,C10111)[[3]])
+QC1011=termination(dataZ,C1011r,C10110r,C10111r)
+
+C11000=prebi(14,C1100r)[[2]]
+C11001=prebi(14,C1100r)[[3]]
+C11000r=clean(refinement(C1100r,C11000,C11001)[[2]])
+C11001r=clean(refinement(C1100r,C11000,C11001)[[3]])
+QC1100=termination(dataZ,C1100r,C11000r,C11001r)
+
+C11100=prebi(14,C1110r)[[2]]
+C11101=prebi(14,C1110r)[[3]]
+C11100r=clean(refinement(C1110r,C11100,C11101)[[2]])
+C11101r=clean(refinement(C1110r,C11100,C11101)[[3]])
+QC1110=termination(dataZ,C1110r,C11100r,C11101r)
+
+C11110=prebi(14,C1111r)[[2]]
+C11111=prebi(14,C1111r)[[3]]
+C11110r=clean(refinement(C1111r,C11110,C11111)[[2]])
+C11111r=clean(refinement(C1111r,C11110,C11111)[[3]])
+QC1111=termination(dataZ,C1111r,C11110r,C11111r)
+```
+```{r}
+QC1010
+QC1011
+QC1100
+QC1110
+QC1111
+```
+
+
+In this iteration the DHCC algorithm stops because there are no more clusters that can be separated to improve cluster quality.
+
+## Hierarchical Structure
+
+The hierarchical structure of the DHCC algorithm can be described by a binary tree as below:
+```{r,echo=FALSE}
+library(data.tree)
+DHCC = Node$new("C")
+leaf0=DHCC$AddChild("C0r")
+leaf1=DHCC$AddChild("C1r")
+  leaf10=leaf1$AddChild("C10r")
+    leaf100=leaf10$AddChild("C100r")
+    leaf101=leaf10$AddChild("C101r")
+      leaf1010=leaf101$AddChild("C1010r")
+      leaf1011=leaf101$AddChild("C1011r")
+  leaf11=leaf1$AddChild("C11r")
+    leaf110=leaf11$AddChild("C110r")
+      leaf1100=leaf110$AddChild("C1100r")
+      leaf1101=leaf110$AddChild("C1101r")
+    leaf111=leaf11$AddChild("C111r")
+      leaf1110=leaf111$AddChild("C1110r")
+      leaf1111=leaf111$AddChild("C1111r")
+      
+DHCC$member=54
+  DHCC$'C0r'$member=38
+  DHCC$'C1r'$member=16
+    DHCC$'C1r'$'C10r'$member=8
+      DHCC$'C1r'$'C10r'$'C100r'$member=4
+      DHCC$'C1r'$'C10r'$'C101r'$member=4
+        DHCC$'C1r'$'C10r'$'C101r'$'C1010r'$member=2
+        DHCC$'C1r'$'C10r'$'C101r'$'C1011r'$member=2
+    DHCC$'C1r'$'C11r'$member=8
+      DHCC$'C1r'$'C11r'$'C110r'$member=3
+        DHCC$'C1r'$'C11r'$'C110r'$'C1100r'$member=2
+        DHCC$'C1r'$'C11r'$'C110r'$'C1101r'$member=1
+     DHCC$'C1r'$'C11r'$'C111r'$member=5
+        DHCC$'C1r'$'C11r'$'C111r'$'C1110r'$member=3
+        DHCC$'C1r'$'C11r'$'C111r'$'C1111r'$member=2
+
+print(DHCC,"member")
+```
+## Cluster Visualization
+
+The result of the analysis must be joined with the original categorical data, which is the data before transformed into indicator matrix. Here the code is used as like in SQL (with *sqldf*) and the original data. **Don't forget to adjust the file directory when importing data**.
+```{r}
+library(sqldf)
+data<- read_excel("C:/data-original.xlsx")
+C0f=sqldf("SELECT d.NAMA,d.X1,d.X2,d.X3,d.X4,d.X5,d.X6,d.X7,d.X8,d.X9,d.X10,d.X11,d.X12,d.X13,d.X14
+        FROM C0r
+        LEFT JOIN data AS d
+        USING (Nama)")
+C100f=sqldf("SELECT d.NAMA,d.X1,d.X2,d.X3,d.X4,d.X5,d.X6,d.X7,d.X8,d.X9,d.X10,d.X11,d.X12,d.X13,d.X14
+        FROM C100r
+        LEFT JOIN data AS d
+        USING (Nama)")
+C1010f=sqldf("SELECT d.NAMA,d.X1,d.X2,d.X3,d.X4,d.X5,d.X6,d.X7,d.X8,d.X9,d.X10,d.X11,d.X12,d.X13,d.X14
+        FROM C1010r
+        LEFT JOIN data AS d
+        USING (Nama)")
+C1011f=sqldf("SELECT d.NAMA,d.X1,d.X2,d.X3,d.X4,d.X5,d.X6,d.X7,d.X8,d.X9,d.X10,d.X11,d.X12,d.X13,d.X14
+        FROM C1011r
+        LEFT JOIN data AS d
+        USING (Nama)")
+C1100f=sqldf("SELECT d.NAMA,d.X1,d.X2,d.X3,d.X4,d.X5,d.X6,d.X7,d.X8,d.X9,d.X10,d.X11,d.X12,d.X13,d.X14
+        FROM C1100r
+        LEFT JOIN data AS d
+        USING (Nama)")
+C1101f=sqldf("SELECT d.NAMA,d.X1,d.X2,d.X3,d.X4,d.X5,d.X6,d.X7,d.X8,d.X9,d.X10,d.X11,d.X12,d.X13,d.X14
+        FROM C1101r
+        LEFT JOIN data AS d
+        USING (Nama)")
+C1110f=sqldf("SELECT d.NAMA,d.X1,d.X2,d.X3,d.X4,d.X5,d.X6,d.X7,d.X8,d.X9,d.X10,d.X11,d.X12,d.X13,d.X14
+        FROM C1110r
+        LEFT JOIN data AS d
+        USING (Nama)")
+C1111f=sqldf("SELECT d.NAMA,d.X1,d.X2,d.X3,d.X4,d.X5,d.X6,d.X7,d.X8,d.X9,d.X10,d.X11,d.X12,d.X13,d.X14
+        FROM C1111r
+        LEFT JOIN data AS d
+        USING (Nama)")
+
+C0f['Cluster']='C0r'
+C100f['Cluster']='C100r'
+C1010f['Cluster']='C1010r'
+C1011f['Cluster']='C1011r'
+C1100f['Cluster']='C1100r'
+C1101f['Cluster']='C1011r'
+C1110f['Cluster']='C1110r'
+C1111f['Cluster']='C1111r'
+
+result=rbind(C0f,C100f,C1010f,C1011f,C1100f,C1101f,C1110f,C1111f)
+
+
+```
+```{r}
+library("ggplot2")
+library("reshape2")
+library("data.table")
+
+result.long = melt(setDT(result), 
+                  id = c("Nama", "Cluster"), factorsAsStrings=T)
+
+```
+
+```{r}
+result.long.q = result.long %>%
+  group_by(Cluster, variable, value) %>%
+  mutate(count = n_distinct(Nama)) %>%
+  distinct(Cluster, variable, value, count) 
+```
+
+```{r}
+result.long.p = result.long.q %>%
+  group_by(Cluster, variable) %>%
+  mutate(perc = count / sum(count)) %>%
+  arrange(Cluster)
+
+result.clean=result.long.p %>% mutate(code=paste(variable)) %>% unite('value',value,code,sep='-')
+```
+
+```{r}
+heatmap = ggplot(result.clean, aes(x = Cluster, y = factor(value, levels = c("Yes-X1","No-X1","Yes-X2","No-X2","Adventure-X3","Non-Adventure-X3","Both-X3","Strongly Disagree-X4","Disagree-X4","Neutral-X4","Agree-X4","Strongly Agree-X4","Strongly Disagree-X5","Disagree-X5","Neutral-X5","Agree-X5","Strongly Agree-X5","Strongly Disagree-X6","Disagree-X6","Neutral-X6","Agree-X6","Strongly Agree-X6","Strongly Disagree-X7","Disagree-X7","Neutral-X7","Agree-X7","Strongly Agree-X7","Strongly Disagree-X8","Disagree-X8","Neutral-X8","Agree-X8","Strongly Agree-X8","Strongly Disagree-X9","Disagree-X9","Neutral-X9","Agree-X9","Strongly Agree-X9","Strongly Disagree-X10","Disagree-X10","Neutral-X10","Agree-X10","Strongly Agree-X10","Strongly Disagree-X11","Disagree-X11","Neutral-X11","Agree-X11","Strongly Agree-X11","Strongly Disagree-X12","Disagree-X12","Neutral-X12","Agree-X12","Strongly Agree-X12","Strongly Disagree-X13","Disagree-X13","Neutral-X13","Agree-X13","Strongly Agree-X13","Strongly Disagree-X14","Disagree-X14","Neutral-X14","Agree-X14","Strongly Agree-X14"), ordered = T)))+
+  geom_tile(aes(fill = perc), alpha = 0.9)+
+  scale_fill_gradient2(low = "blue", mid = "green", high = "red")+
+  labs(title = "Distribution of characteristics across clusters", x = "Cluster", y = NULL)+
+  theme(axis.text.y = element_text(size=4))+
+  geom_hline(yintercept = 2.5)+
+  geom_hline(yintercept = 4.5)+
+  geom_hline(yintercept = 7.5)+
+  geom_hline(yintercept = 11.5)+
+  geom_hline(yintercept = 16.5)+
+  geom_hline(yintercept = 21.5)+
+  geom_hline(yintercept = 26.5)+
+  geom_hline(yintercept = 30.5)+
+  geom_hline(yintercept = 35.5)+
+  geom_hline(yintercept = 39.5)+
+  geom_hline(yintercept = 43.5)+
+  geom_hline(yintercept = 48.5)+
+  geom_hline(yintercept = 52.5)
+ 
+
+heatmap
+```
+
+Having a heatmap above can be seen how many category values fall into each factor level within cluster. The more red corresponds to a higher relative number of values category within a cluster.
